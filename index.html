@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hex5</title>
+<style>
+:root{
+  --bg:#f3ede2; --panel:#fffaf1; --ink:#2b2620; --muted:#7b7062; --line:#e0d5c3;
+  --cell:#e3c78f; --cell-edge:#b48f53; --cell-hover:#eed8a6;
+  --white:#fdfcf8; --white-edge:#8a8275; --black:#1e1d1c; --black-edge:#000;
+  --last:#c0392b; --win:#1f7ae0;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#191714; --panel:#24211d; --ink:#ede5d8; --muted:#a39886; --line:#3a352e;
+    --cell:#8a7148; --cell-edge:#5a4729; --cell-hover:#9c8256;
+    --white:#f4f1ea; --white-edge:#6f685c; --black:#121110; --black-edge:#000;
+    --last:#ff6b5a; --win:#5aa9ff;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#191714; --panel:#24211d; --ink:#ede5d8; --muted:#a39886; --line:#3a352e;
+  --cell:#8a7148; --cell-edge:#5a4729; --cell-hover:#9c8256;
+  --white:#f4f1ea; --white-edge:#6f685c; --black:#121110; --black-edge:#000;
+  --last:#ff6b5a; --win:#5aa9ff;
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg);color:var(--ink);font:15px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;}
+main{max-width:820px;margin:0 auto;padding:16px;}
+header{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap}
+h1{font-size:22px;margin:0;letter-spacing:.02em}
+.rules-link{color:var(--muted);font-size:13px;cursor:pointer;background:none;border:0;text-decoration:underline;padding:0}
+.bar{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;
+  background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 14px;margin:12px 0}
+.player{display:flex;align-items:center;gap:8px;padding:4px 10px;border-radius:999px;border:2px solid transparent}
+.player.active{border-color:var(--ink)}
+.dot{width:16px;height:16px;border-radius:50%;display:inline-block;flex:none}
+.dot.w{background:var(--white);border:1px solid var(--white-edge)}
+.dot.b{background:var(--black);border:1px solid var(--black-edge)}
+.caps{display:flex;gap:3px;margin-left:4px}
+.pip{width:8px;height:8px;border-radius:2px;background:var(--line)}
+.pip.on{background:var(--ink)}
+#status{font-weight:600;text-align:center;flex:1;min-width:140px}
+.btns{display:flex;gap:8px}
+button.btn{font:inherit;background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:6px 12px;cursor:pointer}
+button.btn:hover{border-color:var(--muted)}
+button.btn:disabled{opacity:.4;cursor:default}
+#board{width:100%;height:auto;display:block;touch-action:manipulation;user-select:none}
+.cell polygon{fill:var(--cell);stroke:var(--cell-edge);stroke-width:1}
+.cell{cursor:pointer}
+.cell.occ,svg.over .cell{cursor:default}
+.cell:not(.occ):hover polygon{fill:var(--cell-hover)}
+svg.over .cell:hover polygon{fill:var(--cell)}
+.ghost{opacity:0;pointer-events:none}
+.cell:not(.occ):hover .ghost{opacity:.45}
+svg.over .ghost{display:none}
+svg.turn-w .ghost{fill:var(--white);stroke:var(--white-edge)}
+svg.turn-b .ghost{fill:var(--black);stroke:var(--black-edge)}
+#stones,#fx{pointer-events:none}
+.stone.w{fill:var(--white);stroke:var(--white-edge);stroke-width:1}
+.stone.b{fill:var(--black);stroke:var(--black-edge);stroke-width:1}
+.stone.win{stroke:var(--win);stroke-width:3.5}
+.lastmark{fill:none;stroke:var(--last);stroke-width:2.2}
+.centermark{fill:var(--cell-edge);pointer-events:none}
+.winline{stroke:var(--win);stroke-width:4;stroke-linecap:round;opacity:.55}
+.poof{animation:poof .55s ease-out forwards}
+@keyframes poof{from{opacity:.9;transform:scale(1)}to{opacity:0;transform:scale(1.6)}}
+.poof{transform-box:fill-box;transform-origin:center}
+.new{animation:drop .16s ease-out}
+@keyframes drop{from{transform:scale(1.25);opacity:.4}to{transform:scale(1);opacity:1}}
+.new{transform-box:fill-box;transform-origin:center}
+#banner{display:none;text-align:center;font-size:18px;font-weight:700;margin:8px 0;color:var(--win)}
+#banner.show{display:block}
+dialog{background:var(--panel);color:var(--ink);border:1px solid var(--line);border-radius:12px;max-width:520px;width:calc(100% - 32px)}
+dialog::backdrop{background:rgba(0,0,0,.4)}
+dialog ul{padding-left:20px}
+footer{color:var(--muted);font-size:12px;text-align:center;margin-top:8px}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Hex5</h1>
+    <button class="rules-link" id="rulesBtn">How to play</button>
+  </header>
+
+  <div class="bar">
+    <div class="player" id="pW"><span class="dot w"></span>White<span class="caps" id="capsW"></span></div>
+    <div id="status"></div>
+    <div class="player" id="pB"><span class="dot b"></span>Black<span class="caps" id="capsB"></span></div>
+  </div>
+
+  <div id="banner"></div>
+  <svg id="board" xmlns="http://www.w3.org/2000/svg" aria-label="Hex5 board">
+    <g id="cells"></g><g id="stones"></g><g id="fx"></g>
+  </svg>
+
+  <div class="bar" style="justify-content:center">
+    <div class="btns">
+      <button class="btn" id="undoBtn">Undo</button>
+      <button class="btn" id="newBtn">New game</button>
+    </div>
+  </div>
+  <footer>217 cells · White moves first · Ctrl/⌘+Z to undo</footer>
+</main>
+
+<dialog id="rules">
+  <h3 style="margin-top:0">How to play</h3>
+  <ul>
+    <li>Players take turns placing one stone on any empty cell. White goes first.</li>
+    <li><b>Win</b> by getting <b>five or more in a row</b> along any of the three hex directions.</li>
+    <li><b>Capture</b> by flanking exactly two enemy stones in a line: <code>● ○ ○ ●</code>. The two are removed.</li>
+    <li>Placing a stone into a flanked position is safe; captures only happen on the capturer's move.</li>
+    <li>You also <b>win by capturing five pairs</b>.</li>
+  </ul>
+  <form method="dialog" style="text-align:right"><button class="btn">Got it</button></form>
+</dialog>
+
+<script>
+(() => {
+  const N = 8;                         // board radius → 3N(N+1)+1 = 217 cells
+  const R = 20;                        // hex circumradius in SVG units
+  const SQ3 = Math.sqrt(3);
+  const DIRS = [[1,0],[0,1],[-1,1],[-1,0],[0,-1],[1,-1]];
+  const AXES = [[1,0],[0,1],[-1,1]];
+  const WHITE = 1, BLACK = 2, NAME = {1:'White', 2:'Black'};
+  const SVGNS = 'http://www.w3.org/2000/svg';
+
+  const key = (q,r) => q + ',' + r;
+  const onBoard = (q,r) => Math.max(Math.abs(q), Math.abs(r), Math.abs(-q-r)) <= N;
+  const px = (q,r) => [R * SQ3 * (q + r/2), R * 1.5 * r];
+
+  const CELLS = [];
+  for (let q = -N; q <= N; q++)
+    for (let r = Math.max(-N, -q-N); r <= Math.min(N, -q+N); r++) CELLS.push([q,r]);
+
+  const svg = document.getElementById('board');
+  const gCells = document.getElementById('cells');
+  const gStones = document.getElementById('stones');
+  const gFx = document.getElementById('fx');
+  const cellEls = new Map();
+
+  // ---- build board ----
+  const pad = 6, halfW = R * SQ3 * (N + 0.5) + pad, halfH = R * (1.5 * N + 1) + pad;
+  svg.setAttribute('viewBox', `${-halfW} ${-halfH} ${2*halfW} ${2*halfH}`);
+  const hexPts = (cx,cy) => Array.from({length:6}, (_,i) => {
+    const a = Math.PI / 180 * (60 * i - 30);
+    return (cx + R * Math.cos(a)).toFixed(2) + ',' + (cy + R * Math.sin(a)).toFixed(2);
+  }).join(' ');
+  const el = (tag, attrs) => { const e = document.createElementNS(SVGNS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); return e; };
+
+  for (const [q,r] of CELLS) {
+    const [x,y] = px(q,r);
+    const g = el('g', {class:'cell', 'data-k': key(q,r)});
+    g.appendChild(el('polygon', {points: hexPts(x,y)}));
+    if (q === 0 && r === 0) g.appendChild(el('circle', {cx:x, cy:y, r:2.5, class:'centermark'}));
+    g.appendChild(el('circle', {cx:x, cy:y, r:R*0.72, class:'ghost', 'stroke-width':1}));
+    g.addEventListener('click', () => play(q,r));
+    gCells.appendChild(g);
+    cellEls.set(key(q,r), g);
+  }
+
+  // ---- game state ----
+  let S, history;
+  function newGame() {
+    S = { board: new Map(), turn: WHITE, caps: {1:0, 2:0}, last: null,
+          winner: 0, how: '', winLine: [] };
+    history = [];
+    render();
+  }
+  const snapshot = () => ({ board: new Map(S.board), turn: S.turn, caps: {...S.caps}, last: S.last });
+
+  function play(q, r) {
+    const k = key(q,r);
+    if (S.winner || S.board.has(k) || !onBoard(q,r)) return;
+    history.push(snapshot());
+    const me = S.turn, opp = 3 - me;
+    S.board.set(k, me);
+    S.last = k;
+
+    // captures: me opp opp me
+    const captured = [];
+    for (const [dq,dr] of DIRS) {
+      const k1 = key(q+dq, r+dr), k2 = key(q+2*dq, r+2*dr), k3 = key(q+3*dq, r+3*dr);
+      if (S.board.get(k1) === opp && S.board.get(k2) === opp && S.board.get(k3) === me) {
+        S.board.delete(k1); S.board.delete(k2);
+        captured.push([q+dq, r+dr, opp], [q+2*dq, r+2*dr, opp]);
+      }
+    }
+    S.caps[me] += captured.length / 2;
+
+    // five (or more) in a row through the placed stone
+    for (const [dq,dr] of AXES) {
+      const line = [[q,r]];
+      for (const s of [1,-1]) {
+        let cq = q + s*dq, cr = r + s*dr;
+        while (S.board.get(key(cq,cr)) === me) { line.push([cq,cr]); cq += s*dq; cr += s*dr; }
+      }
+      if (line.length >= 5) { S.winner = me; S.how = `${line.length} in a row`; S.winLine = line; break; }
+    }
+    if (!S.winner && S.caps[me] >= 5) { S.winner = me; S.how = 'five captures'; }
+    if (!S.winner && S.board.size === CELLS.length) { S.winner = 3; S.how = 'board full'; }
+
+    if (!S.winner) S.turn = opp;
+    render(captured, k);
+  }
+
+  function undo() {
+    if (!history.length) return;
+    const h = history.pop();
+    Object.assign(S, h, { winner: 0, how: '', winLine: [] });
+    render();
+  }
+
+  // ---- render ----
+  function render(captured = [], placedKey = null) {
+    gStones.textContent = '';
+    gFx.textContent = '';
+    const winSet = new Set(S.winLine.map(([q,r]) => key(q,r)));
+    for (const [q,r] of CELLS) {
+      const k = key(q,r), v = S.board.get(k);
+      cellEls.get(k).classList.toggle('occ', !!v);
+      if (!v) continue;
+      const [x,y] = px(q,r);
+      const cls = 'stone ' + (v === WHITE ? 'w' : 'b') + (winSet.has(k) ? ' win' : '') + (k === placedKey ? ' new' : '');
+      gStones.appendChild(el('circle', {cx:x, cy:y, r:R*0.72, class:cls}));
+    }
+    if (S.last && S.board.has(S.last) && !S.winLine.length) {
+      const [q,r] = S.last.split(',').map(Number), [x,y] = px(q,r);
+      gStones.appendChild(el('circle', {cx:x, cy:y, r:R*0.28, class:'lastmark'}));
+    }
+    if (S.winLine.length) {
+      const pts = S.winLine.map(([q,r]) => px(q,r)).sort((a,b) => a[0]-b[0] || a[1]-b[1]);
+      const [a,b] = [pts[0], pts[pts.length-1]];
+      gFx.appendChild(el('line', {x1:a[0], y1:a[1], x2:b[0], y2:b[1], class:'winline'}));
+    }
+    for (const [q,r,c] of captured) {
+      const [x,y] = px(q,r);
+      gFx.appendChild(el('circle', {cx:x, cy:y, r:R*0.72, class:'stone poof ' + (c === WHITE ? 'w' : 'b')}));
+    }
+
+    svg.classList.toggle('over', !!S.winner);
+    svg.classList.toggle('turn-w', S.turn === WHITE);
+    svg.classList.toggle('turn-b', S.turn === BLACK);
+    document.getElementById('pW').classList.toggle('active', !S.winner && S.turn === WHITE);
+    document.getElementById('pB').classList.toggle('active', !S.winner && S.turn === BLACK);
+    for (const [id, p] of [['capsW', WHITE], ['capsB', BLACK]])
+      document.getElementById(id).innerHTML = Array.from({length:5}, (_,i) => `<span class="pip${i < S.caps[p] ? ' on' : ''}"></span>`).join('');
+
+    const status = document.getElementById('status'), banner = document.getElementById('banner');
+    if (S.winner === 3) { status.textContent = 'Draw'; banner.textContent = 'Draw — the board is full.'; }
+    else if (S.winner) { status.textContent = `${NAME[S.winner]} wins`; banner.textContent = `${NAME[S.winner]} wins with ${S.how}!`; }
+    else status.textContent = `${NAME[S.turn]} to move`;
+    banner.classList.toggle('show', !!S.winner);
+    document.getElementById('undoBtn').disabled = !history.length;
+  }
+
+  document.getElementById('undoBtn').onclick = undo;
+  document.getElementById('newBtn').onclick = () => { if (!history.length || S.winner || confirm('Start a new game?')) newGame(); };
+  document.getElementById('rulesBtn').onclick = () => document.getElementById('rules').showModal();
+  document.addEventListener('keydown', e => { if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); undo(); } });
+
+  window.Hex5 = { play, undo, newGame, state: () => S, cellCount: CELLS.length };
+  newGame();
+})();
+</script>
+</body>
+</html>
