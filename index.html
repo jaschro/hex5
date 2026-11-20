@@ -77,6 +77,12 @@ dialog{background:var(--panel);color:var(--ink);border:1px solid var(--line);bor
 dialog::backdrop{background:rgba(0,0,0,.4)}
 dialog ul{padding-left:20px}
 footer{color:var(--muted);font-size:12px;text-align:center;margin-top:8px}
+.setup{justify-content:center;gap:16px}
+.setup label{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:14px}
+.setup select{font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:4px 8px}
+.setup.two .ai-only{display:none}
+svg.thinking .cell{cursor:wait}
+svg.thinking .ghost{display:none}
 </style>
 </head>
 <body>
@@ -86,10 +92,19 @@ footer{color:var(--muted);font-size:12px;text-align:center;margin-top:8px}
     <button class="rules-link" id="rulesBtn">How to play</button>
   </header>
 
+  <div class="bar setup two" id="setup">
+    <label>Mode
+      <select id="mode"><option value="2p">2 players</option><option value="ai">vs Computer</option></select></label>
+    <label class="ai-only">Level
+      <select id="level"><option value="easy">Easy</option><option value="medium" selected>Medium</option><option value="hard">Hard</option></select></label>
+    <label class="ai-only">You play
+      <select id="side"><option value="1">White (first)</option><option value="2">Black (second)</option></select></label>
+  </div>
+
   <div class="bar">
-    <div class="player" id="pW"><span class="dot w"></span>White<span class="caps" id="capsW"></span></div>
+    <div class="player" id="pW"><span class="dot w"></span><span id="nameW">White</span><span class="caps" id="capsW"></span></div>
     <div id="status"></div>
-    <div class="player" id="pB"><span class="dot b"></span>Black<span class="caps" id="capsB"></span></div>
+    <div class="player" id="pB"><span class="dot b"></span><span id="nameB">Black</span><span class="caps" id="capsB"></span></div>
   </div>
 
   <div id="banner"></div>
@@ -120,29 +135,226 @@ footer{color:var(--muted);font-size:12px;text-align:center;margin-top:8px}
 
 <script>
 (() => {
+  // ================= Board geometry =================
   const N = 8;                         // board radius → 3N(N+1)+1 = 217 cells
   const R = 20;                        // hex circumradius in SVG units
   const SQ3 = Math.sqrt(3);
-  const DIRS = [[1,0],[0,1],[-1,1],[-1,0],[0,-1],[1,-1]];
-  const AXES = [[1,0],[0,1],[-1,1]];
-  const WHITE = 1, BLACK = 2, NAME = {1:'White', 2:'Black'};
+  const DIRS = [[1,0],[0,1],[-1,1],[-1,0],[0,-1],[1,-1]];   // DIRS[d+3] is opposite of DIRS[d]
+  const WHITE = 1, BLACK = 2;
   const SVGNS = 'http://www.w3.org/2000/svg';
 
   const key = (q,r) => q + ',' + r;
-  const onBoard = (q,r) => Math.max(Math.abs(q), Math.abs(r), Math.abs(-q-r)) <= N;
   const px = (q,r) => [R * SQ3 * (q + r/2), R * 1.5 * r];
 
-  const CELLS = [];
+  const CELLS = [], INDEX = new Map();
   for (let q = -N; q <= N; q++)
-    for (let r = Math.max(-N, -q-N); r <= Math.min(N, -q+N); r++) CELLS.push([q,r]);
+    for (let r = Math.max(-N, -q-N); r <= Math.min(N, -q+N); r++) { INDEX.set(key(q,r), CELLS.length); CELLS.push([q,r]); }
+  const NC = CELLS.length;
+  const CENTER = INDEX.get(key(0,0));
+  const idx = (q,r) => INDEX.has(key(q,r)) ? INDEX.get(key(q,r)) : -1;
+  const NB = CELLS.map(([q,r]) => DIRS.map(([dq,dr]) => idx(q+dq, r+dr)));
 
+  // every 5-cell window along the 3 axes, and which windows each cell belongs to
+  const WIN_LIST = [];
+  for (let i = 0; i < NC; i++) for (let d = 0; d < 3; d++) {
+    const w = [i]; let c = i;
+    for (let k = 1; k < 5 && c >= 0; k++) { c = NB[c][d]; w.push(c); }
+    if (c >= 0) WIN_LIST.push(w);
+  }
+  const WINS = Int16Array.from(WIN_LIST.flat());
+  const NW = WIN_LIST.length;
+  const WIN_OF = CELLS.map(() => []);
+  WIN_LIST.forEach((w, n) => w.forEach(c => WIN_OF[c].push(n)));
+
+  // every 4-cell run in all 6 directions (for spotting capture threats  X O O _ )
+  const SEG_LIST = [];
+  for (let i = 0; i < NC; i++) for (let d = 0; d < 6; d++) {
+    const a = NB[i][d], b = a >= 0 ? NB[a][d] : -1, c = b >= 0 ? NB[b][d] : -1;
+    if (c >= 0) SEG_LIST.push(i, a, b, c);
+  }
+  const SEGS = Int16Array.from(SEG_LIST);
+
+  // cells within distance 2 of each cell (move generation)
+  const NEAR = CELLS.map(([q,r]) => {
+    const out = [];
+    for (let dq = -2; dq <= 2; dq++) for (let dr = -2; dr <= 2; dr++) {
+      if (Math.max(Math.abs(dq), Math.abs(dr), Math.abs(dq+dr)) > 2 || (!dq && !dr)) continue;
+      const j = idx(q+dq, r+dr); if (j >= 0) out.push(j);
+    }
+    return out;
+  });
+
+  // ================= Game engine (shared by UI and AI) =================
+  const E = { b: new Int8Array(NC), caps: [0,0,0], count: 0 };
+
+  function make(i, p) {               // place stone, apply captures; returns captured cells or null
+    const b = E.b, o = 3 - p; let cap = null;
+    b[i] = p; E.count++;
+    for (let d = 0; d < 6; d++) {
+      const a = NB[i][d]; if (a < 0 || b[a] !== o) continue;
+      const c = NB[a][d]; if (c < 0 || b[c] !== o) continue;
+      const e = NB[c][d]; if (e < 0 || b[e] !== p) continue;
+      b[a] = 0; b[c] = 0; E.count -= 2;
+      (cap || (cap = [])).push(a, c);
+    }
+    if (cap) E.caps[p] += cap.length / 2;
+    return cap;
+  }
+  function unmake(i, p, cap) {
+    E.b[i] = 0; E.count--;
+    if (cap) { for (const x of cap) E.b[x] = 3 - p; E.count += cap.length; E.caps[p] -= cap.length / 2; }
+  }
+  function lineThrough(i, p, axis) {
+    const line = [i];
+    for (const d of [axis, axis + 3]) { let c = NB[i][d]; while (c >= 0 && E.b[c] === p) { line.push(c); c = NB[c][d]; } }
+    return line;
+  }
+  function isWin(i, p) {
+    if (E.caps[p] >= 5) return true;
+    for (let a = 0; a < 3; a++) if (lineThrough(i, p, a).length >= 5) return true;
+    return false;
+  }
+
+  // ================= AI =================
+  const WIN = 1e7, TIMEOUT = {};
+  const LINE_W = [0, 2, 24, 220, 3000, 0];             // value of a window holding k of my stones and none of theirs
+  const CAP_W = [0, 220, 550, 1300, 4000, 0];          // value of having captured k pairs
+  const THREAT_W = 90;                                  // value of each capture threat (X O O _)
+  const ATT = [1, 12, 120, 1500, 1e6];                  // move ordering: extend my window holding k stones
+  const DEF = [0, 10, 100, 1200, 1e5];                  // move ordering: block their window holding k stones
+  let nodes = 0, deadline = Infinity;
+  const stamp = new Int32Array(NC); let stampN = 0;
+
+  function evaluate(p) {               // static score from the point of view of p (the side to move)
+    const b = E.b; let s1 = 0, s2 = 0, open4a = -1, open4b = -1, fours2 = 0, my4 = false;
+    for (let n = 0, o = 0; n < NW; n++, o += 5) {
+      let c1 = 0, c2 = 0, empty = -1;
+      for (let k = 0; k < 5; k++) { const v = b[WINS[o+k]]; if (v === 1) c1++; else if (v === 2) c2++; else empty = WINS[o+k]; }
+      if (c2 === 0) { s1 += LINE_W[c1]; if (c1 === 4) { if (p === 1) my4 = true; else { if (open4a < 0) open4a = empty; else if (empty !== open4a) fours2 = 1; } } }
+      else if (c1 === 0) { s2 += LINE_W[c2]; if (c2 === 4) { if (p === 2) my4 = true; else { if (open4b < 0) open4b = empty; else if (empty !== open4b) fours2 = 1; } } }
+    }
+    if (my4) return WIN / 2;                         // I can complete five right now
+    let t1 = 0, t2 = 0;
+    for (let o = 0; o < SEGS.length; o += 4) {
+      const x = b[SEGS[o]]; if (!x) continue;
+      const y = b[SEGS[o+1]];
+      if (y === 3 - x && b[SEGS[o+2]] === y && b[SEGS[o+3]] === 0) { if (x === 1) t1++; else t2++; }
+    }
+    if ((p === 1 ? t1 : t2) > 0 && E.caps[p] === 4) return WIN / 2;   // I can take my fifth pair right now
+    s1 += CAP_W[E.caps[1]] + THREAT_W * t1;
+    s2 += CAP_W[E.caps[2]] + THREAT_W * t2;
+    let score = p === 1 ? s1 * 1.2 - s2 : s2 * 1.2 - s1;
+    if (fours2) score -= WIN / 4;                    // opponent has two different fives threatened
+    return score;
+  }
+
+  function candidates(p) {            // empty cells near stones, ordered by a quick tactical score
+    if (E.count === 0) return [{ c: CENTER, s: 0 }];
+    const b = E.b, o = 3 - p, out = [];
+    stampN++;
+    for (let i = 0; i < NC; i++) {
+      if (!b[i]) continue;
+      for (const c of NEAR[i]) {
+        if (b[c] || stamp[c] === stampN) continue;
+        stamp[c] = stampN;
+        let s = 0;
+        for (const n of WIN_OF[c]) {
+          let cm = 0, co = 0;
+          for (let k = n*5; k < n*5 + 5; k++) { const v = b[WINS[k]]; if (v === p) cm++; else if (v === o) co++; }
+          if (co === 0) s += ATT[cm]; else if (cm === 0) s += DEF[co];
+        }
+        for (let d = 0; d < 6; d++) {                // captures I could make / opponent captures I prevent
+          const a = NB[c][d]; if (a < 0) continue;
+          const a2 = NB[a][d]; if (a2 < 0) continue;
+          const a3 = NB[a2][d]; if (a3 < 0) continue;
+          if (b[a] === o && b[a2] === o && b[a3] === p) s += E.caps[p] === 4 ? 1e6 : 4000 + 1500 * E.caps[p];
+          if (b[a] === p && b[a2] === p && b[a3] === o) s += E.caps[o] === 4 ? 1e5 : 2500 + 1000 * E.caps[o];
+        }
+        out.push({ c, s });
+      }
+    }
+    out.sort((x, y) => y.s - x.s);
+    if (out.length && out[0].s >= 1e6) return [out[0]];            // winning move: nothing else matters
+    if (out.length && out[0].s >= 1e5) return out.filter(m => m.s >= 4000); // must block (or capture out of it)
+    return out;
+  }
+
+  function negamax(p, depth, alpha, beta, ply, width) {
+    if ((++nodes & 1023) === 0 && performance.now() > deadline) throw TIMEOUT;
+    if (depth === 0) return evaluate(p);
+    const moves = candidates(p);
+    if (!moves.length) return 0;
+    let best = -Infinity;
+    for (let k = 0; k < moves.length && k < width; k++) {
+      const c = moves[k].c, cap = make(c, p);
+      const v = isWin(c, p) ? WIN - ply : -negamax(3 - p, depth - 1, -beta, -alpha, ply + 1, width);
+      unmake(c, p, cap);
+      if (v > best) best = v;
+      if (v > alpha) alpha = v;
+      if (alpha >= beta) break;
+    }
+    return best;
+  }
+
+  function searchRoot(p, depth, rootMoves, width) {
+    let alpha = -Infinity, scored = [];
+    for (const m of rootMoves) {
+      const cap = make(m.c, p);
+      const v = isWin(m.c, p) ? WIN : -negamax(3 - p, depth - 1, -Infinity, -alpha, 1, width);
+      unmake(m.c, p, cap);
+      scored.push({ c: m.c, v });
+      if (v > alpha) alpha = v;
+      if (v >= WIN - 10) break;
+    }
+    return scored.sort((a, b) => b.v - a.v);
+  }
+
+  const LEVELS = {
+    easy:   { depth: 1, rootWidth: 6,  width: 0, time: 0 },
+    medium: { depth: 2, rootWidth: 12, width: 10, time: 1500 },
+    hard:   { depth: 6, rootWidth: 14, width: 9,  time: 1800 },
+  };
+
+  function chooseMove(p, level) {
+    const L = LEVELS[level];
+    const moves = candidates(p);
+    if (moves.length === 1 || moves[0].s >= 1e6) return moves[0].c;
+    if (level === 'easy') {
+      if (moves[0].s >= 1e5 && Math.random() < 0.85) return moves[0].c;   // usually blocks a four
+      const top = moves.slice(0, L.rootWidth);
+      return top[Math.floor(Math.random() * Math.random() * top.length)].c; // biased toward better moves
+    }
+    const saved = { b: E.b.slice(), caps: E.caps.slice(), count: E.count };
+    const root = moves.slice(0, L.rootWidth);
+    let best = root[0].c, ranked = null;
+    nodes = 0; deadline = performance.now() + L.time;
+    try {
+      for (let d = 2; d <= L.depth; d++) {            // iterative deepening
+        ranked = searchRoot(p, d, root, L.width);
+        best = ranked[0].c;
+        if (ranked[0].v >= WIN - 50 || ranked[0].v <= -(WIN - 50)) break;
+        root.sort((a, b) => ranked.findIndex(r => r.c === a.c) - ranked.findIndex(r => r.c === b.c));
+      }
+    } catch (e) {
+      if (e !== TIMEOUT) throw e;
+      E.b.set(saved.b); E.caps = saved.caps; E.count = saved.count;   // restore after aborted search
+    }
+    deadline = Infinity;
+    if ((level === 'medium' || E.count < 8) && ranked && ranked.length > 1 && Math.abs(ranked[0].v) < WIN / 8) {
+      const close = ranked.filter(r => r.v >= ranked[0].v - Math.max(30, Math.abs(ranked[0].v) * 0.05));
+      best = close[Math.floor(Math.random() * close.length)].c;          // a little variety
+    }
+    return best;
+  }
+
+  // ================= UI =================
   const svg = document.getElementById('board');
   const gCells = document.getElementById('cells');
   const gStones = document.getElementById('stones');
   const gFx = document.getElementById('fx');
-  const cellEls = new Map();
+  const $ = id => document.getElementById(id);
+  const cellEls = [];
 
-  // ---- build board ----
   const pad = 6, halfW = R * SQ3 * (N + 0.5) + pad, halfH = R * (1.5 * N + 1) + pad;
   svg.setAttribute('viewBox', `${-halfW} ${-halfH} ${2*halfW} ${2*halfH}`);
   const hexPts = (cx,cy) => Array.from({length:6}, (_,i) => {
@@ -151,118 +363,150 @@ footer{color:var(--muted);font-size:12px;text-align:center;margin-top:8px}
   }).join(' ');
   const el = (tag, attrs) => { const e = document.createElementNS(SVGNS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); return e; };
 
-  for (const [q,r] of CELLS) {
+  CELLS.forEach(([q,r], i) => {
     const [x,y] = px(q,r);
-    const g = el('g', {class:'cell', 'data-k': key(q,r)});
+    const g = el('g', {class:'cell'});
     g.appendChild(el('polygon', {points: hexPts(x,y)}));
-    if (q === 0 && r === 0) g.appendChild(el('circle', {cx:x, cy:y, r:2.5, class:'centermark'}));
+    if (i === CENTER) g.appendChild(el('circle', {cx:x, cy:y, r:2.5, class:'centermark'}));
     g.appendChild(el('circle', {cx:x, cy:y, r:R*0.72, class:'ghost', 'stroke-width':1}));
-    g.addEventListener('click', () => play(q,r));
+    g.addEventListener('click', () => humanPlay(i));
     gCells.appendChild(g);
-    cellEls.set(key(q,r), g);
-  }
+    cellEls.push(g);
+  });
 
-  // ---- game state ----
-  let S, history;
+  // settings
+  const cfg = { mode: '2p', level: 'medium', human: WHITE };
+  let S, history, gameId = 0, thinking = false;
+  const vsAI = () => cfg.mode === 'ai';
+  const isAITurn = () => vsAI() && !S.winner && S.turn !== cfg.human;
+  const name = p => !vsAI() ? (p === WHITE ? 'White' : 'Black') : (p === cfg.human ? 'You' : 'Computer');
+
   function newGame() {
-    S = { board: new Map(), turn: WHITE, caps: {1:0, 2:0}, last: null,
-          winner: 0, how: '', winLine: [] };
+    gameId++; thinking = false;
+    E.b.fill(0); E.caps = [0,0,0]; E.count = 0;
+    S = { turn: WHITE, last: -1, winner: 0, how: '', winLine: [] };
     history = [];
     render();
+    maybeAIMove();
   }
-  const snapshot = () => ({ board: new Map(S.board), turn: S.turn, caps: {...S.caps}, last: S.last });
 
-  function play(q, r) {
-    const k = key(q,r);
-    if (S.winner || S.board.has(k) || !onBoard(q,r)) return;
-    history.push(snapshot());
-    const me = S.turn, opp = 3 - me;
-    S.board.set(k, me);
-    S.last = k;
-
-    // captures: me opp opp me
-    const captured = [];
-    for (const [dq,dr] of DIRS) {
-      const k1 = key(q+dq, r+dr), k2 = key(q+2*dq, r+2*dr), k3 = key(q+3*dq, r+3*dr);
-      if (S.board.get(k1) === opp && S.board.get(k2) === opp && S.board.get(k3) === me) {
-        S.board.delete(k1); S.board.delete(k2);
-        captured.push([q+dq, r+dr, opp], [q+2*dq, r+2*dr, opp]);
-      }
-    }
-    S.caps[me] += captured.length / 2;
-
-    // five (or more) in a row through the placed stone
-    for (const [dq,dr] of AXES) {
-      const line = [[q,r]];
-      for (const s of [1,-1]) {
-        let cq = q + s*dq, cr = r + s*dr;
-        while (S.board.get(key(cq,cr)) === me) { line.push([cq,cr]); cq += s*dq; cr += s*dr; }
-      }
+  function applyMove(i) {
+    const me = S.turn;
+    history.push({ b: E.b.slice(), caps: E.caps.slice(), count: E.count, turn: S.turn, last: S.last });
+    const cap = make(i, me);
+    S.last = i;
+    for (let a = 0; a < 3; a++) {
+      const line = lineThrough(i, me, a);
       if (line.length >= 5) { S.winner = me; S.how = `${line.length} in a row`; S.winLine = line; break; }
     }
-    if (!S.winner && S.caps[me] >= 5) { S.winner = me; S.how = 'five captures'; }
-    if (!S.winner && S.board.size === CELLS.length) { S.winner = 3; S.how = 'board full'; }
-
-    if (!S.winner) S.turn = opp;
-    render(captured, k);
+    if (!S.winner && E.caps[me] >= 5) { S.winner = me; S.how = 'five captures'; }
+    if (!S.winner && E.count === NC) { S.winner = 3; S.how = 'board full'; }
+    if (!S.winner) S.turn = 3 - me;
+    const captured = (cap || []).map(c => [c, 3 - me]);
+    render(captured, i);
+    maybeAIMove();
   }
 
+  function humanPlay(i) {
+    if (S.winner || thinking || E.b[i] || isAITurn()) return;
+    applyMove(i);
+  }
+
+  function maybeAIMove() {
+    if (!isAITurn()) return;
+    thinking = true; render();
+    const id = gameId;
+    setTimeout(() => {                  // let the browser paint "thinking" first
+      if (id !== gameId) return;
+      const c = chooseMove(S.turn, cfg.level);
+      setTimeout(() => {
+        if (id !== gameId) return;
+        thinking = false;
+        applyMove(c);
+      }, 150);
+    }, 250);
+  }
+
+  function restore(h) {
+    E.b.set(h.b); E.caps = h.caps; E.count = h.count;
+    Object.assign(S, { turn: h.turn, last: h.last, winner: 0, how: '', winLine: [] });
+  }
   function undo() {
-    if (!history.length) return;
-    const h = history.pop();
-    Object.assign(S, h, { winner: 0, how: '', winLine: [] });
+    if (!history.length || thinking) return;
+    gameId++;                           // cancel any pending computer move
+    restore(history.pop());
+    while (vsAI() && S.turn !== cfg.human && history.length) restore(history.pop());   // back to your turn
     render();
+    maybeAIMove();
   }
 
-  // ---- render ----
-  function render(captured = [], placedKey = null) {
+  function render(captured = [], placed = -1) {
     gStones.textContent = '';
     gFx.textContent = '';
-    const winSet = new Set(S.winLine.map(([q,r]) => key(q,r)));
-    for (const [q,r] of CELLS) {
-      const k = key(q,r), v = S.board.get(k);
-      cellEls.get(k).classList.toggle('occ', !!v);
-      if (!v) continue;
+    const winSet = new Set(S.winLine);
+    CELLS.forEach(([q,r], i) => {
+      const v = E.b[i];
+      cellEls[i].classList.toggle('occ', !!v);
+      if (!v) return;
       const [x,y] = px(q,r);
-      const cls = 'stone ' + (v === WHITE ? 'w' : 'b') + (winSet.has(k) ? ' win' : '') + (k === placedKey ? ' new' : '');
+      const cls = 'stone ' + (v === WHITE ? 'w' : 'b') + (winSet.has(i) ? ' win' : '') + (i === placed ? ' new' : '');
       gStones.appendChild(el('circle', {cx:x, cy:y, r:R*0.72, class:cls}));
-    }
-    if (S.last && S.board.has(S.last) && !S.winLine.length) {
-      const [q,r] = S.last.split(',').map(Number), [x,y] = px(q,r);
+    });
+    if (S.last >= 0 && E.b[S.last] && !S.winLine.length) {
+      const [x,y] = px(...CELLS[S.last]);
       gStones.appendChild(el('circle', {cx:x, cy:y, r:R*0.28, class:'lastmark'}));
     }
     if (S.winLine.length) {
-      const pts = S.winLine.map(([q,r]) => px(q,r)).sort((a,b) => a[0]-b[0] || a[1]-b[1]);
+      const pts = S.winLine.map(i => px(...CELLS[i])).sort((a,b) => a[0]-b[0] || a[1]-b[1]);
       const [a,b] = [pts[0], pts[pts.length-1]];
       gFx.appendChild(el('line', {x1:a[0], y1:a[1], x2:b[0], y2:b[1], class:'winline'}));
     }
-    for (const [q,r,c] of captured) {
-      const [x,y] = px(q,r);
+    for (const [i,c] of captured) {
+      const [x,y] = px(...CELLS[i]);
       gFx.appendChild(el('circle', {cx:x, cy:y, r:R*0.72, class:'stone poof ' + (c === WHITE ? 'w' : 'b')}));
     }
 
     svg.classList.toggle('over', !!S.winner);
+    svg.classList.toggle('thinking', thinking || isAITurn());
     svg.classList.toggle('turn-w', S.turn === WHITE);
     svg.classList.toggle('turn-b', S.turn === BLACK);
-    document.getElementById('pW').classList.toggle('active', !S.winner && S.turn === WHITE);
-    document.getElementById('pB').classList.toggle('active', !S.winner && S.turn === BLACK);
+    $('nameW').textContent = vsAI() ? `White (${name(WHITE)})` : 'White';
+    $('nameB').textContent = vsAI() ? `Black (${name(BLACK)})` : 'Black';
+    $('pW').classList.toggle('active', !S.winner && S.turn === WHITE);
+    $('pB').classList.toggle('active', !S.winner && S.turn === BLACK);
     for (const [id, p] of [['capsW', WHITE], ['capsB', BLACK]])
-      document.getElementById(id).innerHTML = Array.from({length:5}, (_,i) => `<span class="pip${i < S.caps[p] ? ' on' : ''}"></span>`).join('');
+      $(id).innerHTML = Array.from({length:5}, (_,i) => `<span class="pip${i < E.caps[p] ? ' on' : ''}"></span>`).join('');
 
-    const status = document.getElementById('status'), banner = document.getElementById('banner');
+    const status = $('status'), banner = $('banner');
     if (S.winner === 3) { status.textContent = 'Draw'; banner.textContent = 'Draw — the board is full.'; }
-    else if (S.winner) { status.textContent = `${NAME[S.winner]} wins`; banner.textContent = `${NAME[S.winner]} wins with ${S.how}!`; }
-    else status.textContent = `${NAME[S.turn]} to move`;
+    else if (S.winner) {
+      const who = vsAI() ? (S.winner === cfg.human ? 'You win' : 'Computer wins') : `${name(S.winner)} wins`;
+      status.textContent = who; banner.textContent = `${who} with ${S.how}!`;
+    }
+    else if (thinking || isAITurn()) status.textContent = 'Computer is thinking…';
+    else status.textContent = vsAI() ? 'Your move' : `${name(S.turn)} to move`;
     banner.classList.toggle('show', !!S.winner);
-    document.getElementById('undoBtn').disabled = !history.length;
+    $('undoBtn').disabled = !history.length || thinking;
   }
 
-  document.getElementById('undoBtn').onclick = undo;
-  document.getElementById('newBtn').onclick = () => { if (!history.length || S.winner || confirm('Start a new game?')) newGame(); };
-  document.getElementById('rulesBtn').onclick = () => document.getElementById('rules').showModal();
+  const inProgress = () => history.length && !S.winner;
+  function changeSetting(sel, apply, revert) {
+    if (inProgress() && !confirm('Start a new game with this setting?')) { revert(); return; }
+    apply(); $('setup').classList.toggle('two', !vsAI()); newGame();
+  }
+  $('mode').onchange = e => changeSetting(e.target, () => cfg.mode = e.target.value, () => e.target.value = cfg.mode);
+  $('side').onchange = e => changeSetting(e.target, () => cfg.human = +e.target.value, () => e.target.value = cfg.human);
+  $('level').onchange = e => { cfg.level = e.target.value; };   // takes effect from the computer's next move
+  $('undoBtn').onclick = undo;
+  $('newBtn').onclick = () => { if (!inProgress() || confirm('Start a new game?')) newGame(); };
+  $('rulesBtn').onclick = () => $('rules').showModal();
   document.addEventListener('keydown', e => { if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); undo(); } });
 
-  window.Hex5 = { play, undo, newGame, state: () => S, cellCount: CELLS.length };
+  // test hooks
+  window.Hex5 = {
+    play: (q,r) => humanPlay(idx(q,r)), undo, newGame, cfg, E, CELLS, idx, chooseMove, make, unmake, isWin,
+    state: () => ({ ...S, caps: E.caps.slice(), count: E.count, thinking, history: history.length }),
+  };
   newGame();
 })();
 </script>
